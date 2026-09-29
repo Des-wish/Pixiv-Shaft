@@ -781,6 +781,15 @@
     <string name="string_translate_model_loading">Loading translation model...</string>
     <string name="string_ai_manga_translate_inline">Translate Manga</string>
     <string name="string_ai_manga_translate_manual">Select &amp; Translate</string>
+    <string name="manga_source_auto">Detect source language</string>
+    <string name="manga_source_ja">Source: Japanese</string>
+    <string name="manga_source_en">Source: English</string>
+    <string name="manga_source_ko">Source: Korean</string>
+    <string name="manga_review_title">Review selected translation</string>
+    <string name="manga_review_source">Recognized text</string>
+    <string name="manga_review_translation">Chinese translation</string>
+    <string name="manga_review_apply">Apply</string>
+    <string name="manga_review_reselect">Reselect box</string>
     <string name="string_ai_manga_translate_batch">Translate All Pages</string>
     <string name="string_ai_manga_batch_loading_image">Loading image…</string>
     <string name="string_ai_manga_batch_summary">All pages done: %1$d translated, %2$d without text, %3$d failed</string>

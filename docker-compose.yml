@@ -1,0 +1,25 @@
+name: pixiv
+
+services:
+  android-builder:
+    container_name: pixiv
+    image: pixiv-shaft-android-builder:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    working_dir: /workspace
+    environment:
+      ANDROID_HOME: /opt/android-sdk
+      ANDROID_SDK_ROOT: /opt/android-sdk
+      GRADLE_USER_HOME: /container-data/gradle-cache
+      SHAFT_EVENTS_HMAC: ${SHAFT_EVENTS_HMAC:-}
+    volumes:
+      - type: bind
+        source: .
+        target: /workspace
+      - type: bind
+        source: ${PIXIV_DOCKER_HOME:-D:/docker/pixiv}
+        target: /container-data
+    command: ["sleep", "infinity"]

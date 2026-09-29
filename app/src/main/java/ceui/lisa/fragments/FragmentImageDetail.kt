@@ -6,10 +6,15 @@ import android.graphics.RectF
 import android.net.Uri
 import android.os.Bundle
 import android.text.TextUtils
+import android.text.InputType
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -51,6 +56,7 @@ import com.github.panpf.zoomimage.zoom.GestureType
 import com.github.panpf.zoomimage.zoom.ReadMode
 import com.github.panpf.zoomimage.zoom.ScalesCalculator
 import com.hjq.toast.Toaster
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
@@ -89,6 +95,9 @@ class FragmentImageDetail : BaseFragment<FragmentImageDetailBinding?>() {
     private var largeDisposable: Disposable? = null
     // 原图是否已显示（网络成功 / 本地直读）。large 占位仅在其为 false 时才铺，兜住 large/原图竞态。
     private var originalShown: Boolean = false
+    private var manualSourceHint = ceui.pixiv.ui.translate.MangaSourceLanguage.AUTO
+    private var manualReviewDialog: androidx.appcompat.app.AlertDialog? = null
+    private var pendingManualReselect = false
     // 不再放进 arguments / savedInstanceState，避免每个 Fragment 重复持久化 80KB Illust
     // 导致 TransactionTooLargeException。统一向 ImageDetailActivity 取。
     private val mIllust: Illust?
@@ -144,6 +153,8 @@ class FragmentImageDetail : BaseFragment<FragmentImageDetailBinding?>() {
      * 缩放状态也跟着留着，故意不动 —— 清了反而会和画面上真实的缩放对不上。
      */
     override fun onDestroyView() {
+        manualReviewDialog?.dismiss()
+        manualReviewDialog = null
         isAnimated = false
         ugoiraPlayer?.let {
             it.recycle()
@@ -398,11 +409,60 @@ class FragmentImageDetail : BaseFragment<FragmentImageDetailBinding?>() {
         }
         // 「圈选翻译」请求:命中本页 index 才进圈选模式,进完立刻消费防重复触发
         translationViewModel.manualSelectionRequest.observe(viewLifecycleOwner) { req ->
-            if (req != null && req == index) {
+            if (req != null && req.pageIndex == index) {
+                manualSourceHint = req.sourceHint
                 translationViewModel.consumeManualSelectionRequest()
                 enterManualSelection()
             }
         }
+        translationViewModel.manualReview.observe(viewLifecycleOwner) { review ->
+            if (review?.pageIndex == index && manualReviewDialog == null) showManualReview(review)
+            if (review == null) { manualReviewDialog?.dismiss(); manualReviewDialog = null }
+        }
+        translationViewModel.running.observe(viewLifecycleOwner) { running ->
+            if (running != true && pendingManualReselect) {
+                pendingManualReselect = false
+                enterManualSelection()
+            }
+        }
+    }
+
+    private fun showManualReview(review: ImageTranslationViewModel.ManualReview) {
+        val ctx = requireContext()
+        val density = resources.displayMetrics.density
+        val padding = (16 * density).toInt()
+        val body = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(padding, padding, padding, padding)
+        }
+        fun field(label: Int, initial: String): EditText {
+            body.addView(TextView(ctx).apply { setText(label) })
+            return EditText(ctx).apply {
+                setText(initial)
+                hint = getString(label)
+                minHeight = (48 * density).toInt()
+                maxLines = 5
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                body.addView(this)
+            }
+        }
+        val source = field(R.string.manga_review_source, review.sourceText)
+        val target = field(R.string.manga_review_translation, review.translatedText)
+        manualReviewDialog = MaterialAlertDialogBuilder(ctx)
+            .setTitle(R.string.manga_review_title)
+            .setView(ScrollView(ctx).apply { addView(body) })
+            .setPositiveButton(R.string.manga_review_apply) { _, _ ->
+                translationViewModel.completeManualReview(
+                    ImageTranslationViewModel.ManualCorrection(source.text.toString(), target.text.toString()))
+            }
+            .setNeutralButton(R.string.manga_review_reselect) { _, _ ->
+                pendingManualReselect = true
+                translationViewModel.completeManualReview(null)
+            }
+            .setNegativeButton(android.R.string.cancel) { _, _ -> translationViewModel.completeManualReview(null) }
+            .setOnCancelListener { translationViewModel.completeManualReview(null) }
+            .setOnDismissListener { manualReviewDialog = null }
+            .show() as androidx.appcompat.app.AlertDialog
     }
 
     /** 进圈选模式:亮出框选层接管触摸,画完一框就退出并交给 VM 翻译。 */
@@ -491,6 +551,7 @@ class FragmentImageDetail : BaseFragment<FragmentImageDetailBinding?>() {
                     r,
                     b,
                     MangaOcrModel.MANGA_OCR_BASE,
+                    manualSourceHint,
                 )
             if (!started) {
                 Toaster.showShort(R.string.string_ai_translate_in_progress)

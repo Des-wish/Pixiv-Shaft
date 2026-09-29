@@ -1,0 +1,16 @@
+.git
+.github
+.idea
+.claude
+.gradle
+.kotlin
+**/build
+**/.cxx
+captures
+local.properties
+keystore.properties
+keystore.jks
+*.jks
+*.apk
+*.aab
+.env

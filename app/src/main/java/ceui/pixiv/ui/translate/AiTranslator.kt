@@ -174,12 +174,24 @@ object AiTranslator : Translator {
         onProgress: ((Int, Int) -> Unit)?,
         onPhase: ((AiTranslatePhase) -> Unit)?,
         onRequestSent: (() -> Unit)?,
+    ): List<String> = translateBatchInternal(inputs, null, outputLang, onItem, onProgress, onPhase, onRequestSent)
+
+    override suspend fun translateBatchFrom(
+        inputs: List<String>, sourceLang: String, outputLang: String,
+        onItem: ((Int, String) -> Unit)?, onPhase: ((AiTranslatePhase) -> Unit)?,
+        onRequestSent: (() -> Unit)?,
+    ): List<String> = translateBatchInternal(inputs, sourceLang, outputLang, onItem, null, onPhase, onRequestSent)
+
+    private suspend fun translateBatchInternal(
+        inputs: List<String>, sourceLang: String?, outputLang: String,
+        onItem: ((Int, String) -> Unit)?, onProgress: ((Int, Int) -> Unit)?,
+        onPhase: ((AiTranslatePhase) -> Unit)?, onRequestSent: (() -> Unit)?,
     ): List<String> = withContext(Dispatchers.IO) {
         if (inputs.isEmpty()) return@withContext emptyList()
 
         val results = MutableList(inputs.size) { "" }
         val ranges = chunkByCharLimit(inputs, MAX_BATCH_CHARS)
-        val batchPrompt = batchSystemPromptFor(outputLang)
+        val batchPrompt = batchSystemPromptFor(outputLang, sourceLang)
         val lastError = AtomicReference<Exception?>(null)
         // 任一 chunk 拿到 4xx 配置错误(key 无效/模型不存在)后,所有条目共用同一份配置,
         // 逐条兜底必败且会放大成 N 次请求,直接跳过整批的逐条兜底。
@@ -237,7 +249,7 @@ object AiTranslator : Translator {
                             try {
                                 requestSemaphore.withPermit {
                                     callChatCompletion(
-                                        systemPromptFor(outputLang),
+                                        systemPromptFor(outputLang, sourceLang),
                                         text,
                                         onPhase = phaseAggregator::report,
                                         onRequestSent = onRequestSent,
@@ -343,16 +355,17 @@ object AiTranslator : Translator {
         }
     }
 
-    private fun systemPromptFor(outputLang: String): String {
+    private fun systemPromptFor(outputLang: String, sourceLang: String? = null): String {
         val custom = Shaft.sSettings.aiTranslatePrompt
-        if (custom.isNotBlank()) return custom
-        return "You are a professional translator. Translate the user's text into " +
+        val base = if (custom.isNotBlank()) custom else "You are a professional translator. Translate the user's text into " +
             langName(outputLang) +
             ". Output ONLY the translation, no explanations, no quotes."
+        return if (sourceLang == null) base else "$base\nFor this manga request, translate from " +
+            "${langName(sourceLang)} into ${langName(outputLang)}. Output only the translation."
     }
 
-    private fun batchSystemPromptFor(outputLang: String): String {
-        val base = systemPromptFor(outputLang)
+    private fun batchSystemPromptFor(outputLang: String, sourceLang: String? = null): String {
+        val base = systemPromptFor(outputLang, sourceLang)
         return base + "\nThe user sends a JSON array of strings. Translate each element and " +
             "reply with ONLY a JSON array of the same length, same order, no markdown fences."
     }

@@ -77,6 +77,7 @@ inline const volatile std::uint8_t kMaskB[kStorageSize] = { ${values(maskB)} };
 
 android {
     compileSdk 36
+    ndkVersion = "27.0.12077973"
 
     // Default instrumentation stays fast, while release hardening can explicitly run the same
     // tests against R8 output with -PSHAFT_TEST_BUILD_TYPE=release.
@@ -382,6 +383,11 @@ dependencies {
 
     // ONNX Runtime for offline translation model inference
     implementation libs.onnxRuntime
+    // Bundled, on-device OCR: no Play Services or first-run model download.
+    implementation 'com.google.mlkit:text-recognition:16.0.1'
+    implementation 'com.google.mlkit:text-recognition-japanese:16.0.1'
+    implementation 'com.google.mlkit:text-recognition-korean:16.0.1'
+    implementation 'org.opencv:opencv:4.11.0'
 
     implementation libs.androidxDocumentFile
     implementation libs.markwon

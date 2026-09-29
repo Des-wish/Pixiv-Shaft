@@ -169,10 +169,11 @@ AI 超分将低清插画放大 2–4 倍，重建发丝与线条细节，缩略�
 <td width="50%" valign="top">
 
 #### 💬 翻译漫画（OCR + 翻译）
-自动识别画框里的对话气泡，原位翻译并回填嵌字；「翻译整部」一键翻完多页，退出看图页仍在后台跑。除内置引擎外，还能填自己的 OpenAI 兼容接口。
+本机识别日文、韩文和英文漫画文字，翻译成中文并原位回填；可手选原文语言，圈选时可修正识别文字和译文。「翻译整部」支持后台处理多页。中文简繁跟随 App 设置，其他界面语言默认简体；英韩云翻译尚未启用时使用自定义 AI 接口或 Google 翻译。
 - 气泡自动检测
 - 翻译整部 · 后台继续
 - 自定义 AI 接口 · 流式
+- 复杂背景局部修补 · 长文排版保护
 
 #### 🎞️ 动图 AI 补帧（RIFE）
 RIFE 补帧把 Ugoira 动图自适应插到 2× / 4×，贴近 50fps 上限；播放走帧序列播放器，动作速率不再看设备脸色。
@@ -200,11 +201,61 @@ RIFE 补帧把 Ugoira 动图自适应插到 2× / 4×，贴近 50fps 上限；�
 git clone https://github.com/CeuiLiSA/Pixiv-Shaft.git
 cd Pixiv-Shaft
 
-./gradlew assembleDebug      # debug APK
-./gradlew assembleRelease    # release APK（需要签名配置）
+docker compose build android-builder
+docker compose up -d android-builder
+docker compose exec android-builder bash
 ```
 
-**要求：** JDK 17+、Android SDK 36 · 最低 Android 7.0（Min SDK 24），目标 Android 16（Target SDK 36）
+进入容器后（工作目录为 `/workspace`）：
+
+```bash
+bash scripts/docker-build.sh          # 默认编译 Github Debug APK
+bash scripts/docker-build.sh release  # 编译 Github Release APK
+```
+
+在容器内运行与 CI 相同的单元测试：
+
+```bash
+bash ./gradlew \
+  :app:testGithubDebugUnitTest \
+  :actionqueue:testDebugUnitTest \
+  :feeds:testDebugUnitTest \
+  :websocket:testDebugUnitTest \
+  :banner:testDebugUnitTest \
+  :panel:testDebugUnitTest \
+  :models:testDebugUnitTest \
+  :progressmanager:testDebugUnitTest \
+  :safe:testDebugUnitTest \
+  :witstudio:testDebugUnitTest \
+  --continue
+```
+
+Android 仪器测试还需要 ADB 能看到模拟器或设备。GitHub Actions 会在 Runner 上启动 API 35 模拟器，并让测试容器连接 Runner 的 ADB；当前 Windows Compose 网络不会自动透传本机 USB 设备或模拟器。
+
+要停止容器但保留它在 Docker Desktop 的列表中：
+
+```bash
+docker compose stop android-builder
+```
+
+要删除容器（`D:\docker\pixiv` 下的缓存和 APK 会保留）：
+
+```bash
+docker compose down
+```
+
+**要求：** Docker Desktop 和 Docker Compose v2。Docker Desktop 中的 Compose 项目和容器名称为 `pixiv`。容器内置 JDK 17 与 Android SDK/NDK 工具链。Gradle 缓存保存在 `D:\docker\pixiv\gradle-cache`，APK 导出到 `D:\docker\pixiv\artifacts\apk`。最低 Android 7.0（Min SDK 24），目标 Android 16（Target SDK 36）。
+
+生产签名构建时，将密钥库放在 `D:\docker\pixiv\keystore.jks`，并在仓库根目录被忽略的 `keystore.properties` 中设置 `storeFile=/container-data/keystore.jks`、密钥库密码和别名。
+
+如果构建需要社区活动签名密钥，请在启动 Compose 常驻容器前通过宿主机环境变量设置 `SHAFT_EVENTS_HMAC`。不要把密钥提交到仓库或写入镜像。
+
+如需在 Windows 上保存可迁移的构建镜像，在 PowerShell 中运行：
+
+```powershell
+New-Item -ItemType Directory -Force D:\docker\pixiv\images | Out-Null
+docker save --output D:\docker\pixiv\images\pixiv-shaft-android-builder.tar pixiv-shaft-android-builder:local
+```
 
 ## 💎 订阅
 

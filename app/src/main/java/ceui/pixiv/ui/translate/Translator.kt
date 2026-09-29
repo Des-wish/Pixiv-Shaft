@@ -12,6 +12,15 @@ sealed interface AiTranslatePhase {
 }
 
 interface Translator {
+    /** 漫画按原文语言分组后的入口；其他翻译场景继续使用原接口。 */
+    suspend fun translateBatchFrom(
+        inputs: List<String>, sourceLang: String, outputLang: String,
+        onItem: ((Int, String) -> Unit)? = null,
+        onPhase: ((AiTranslatePhase) -> Unit)? = null,
+        onRequestSent: (() -> Unit)? = null,
+    ): List<String> = translateBatch(inputs, outputLang, onItem = onItem, onPhase = onPhase,
+        onRequestSent = onRequestSent)
+
     suspend fun translate(
         input: String,
         outputLang: String,

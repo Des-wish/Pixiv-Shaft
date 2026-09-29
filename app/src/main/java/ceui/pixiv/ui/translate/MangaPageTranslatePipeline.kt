@@ -74,6 +74,7 @@ object MangaPageTranslatePipeline {
         ctdModel: ComicTextDetectorModel,
         onStage: (Stage) -> Unit,
         onRequestSent: () -> Unit = {},
+        sourceHint: MangaSourceLanguage = MangaSourceLanguage.AUTO,
     ): Outcome {
         // 1. 模型按需加载
         if (!models.isLoaded) {
@@ -82,7 +83,7 @@ object MangaPageTranslatePipeline {
         }
 
         // 2. OCR
-        val ocrResult = MangaOcr.recognize(app, models, imageFile) { stage, fraction ->
+        val ocrResult = MangaOcr.recognize(app, models, imageFile, sourceHint) { stage, fraction ->
             val pct = if (fraction.isNaN()) null else (fraction * 100).toInt().coerceIn(0, 100)
             onStage(Stage(stage, pct))
         } ?: return Outcome.OcrFailed
@@ -94,13 +95,18 @@ object MangaPageTranslatePipeline {
         onStage(Stage(app.getString(R.string.ocr_translating)))
         val translations = mutableMapOf<Int, String>()
         try {
-            currentTranslator().translateBatch(
-                inputs = regions.map { it.text },
-                outputLang = appTranslateTargetLang(),
-                onItem = { i, translated -> translations[i] = translated },
-                onPhase = { phase -> onStage(translatePhaseStage(app, phase)) },
-                onRequestSent = onRequestSent,
-            )
+            val target = mangaTargetLanguage(appTranslateTargetLang())
+            regions.withIndex().groupBy { if (sourceHint == MangaSourceLanguage.AUTO) it.value.sourceLanguage else sourceHint }
+                .forEach { (source, indexed) ->
+                    val result = mangaTranslator(source).translateBatchFrom(
+                        inputs = indexed.map { it.value.text }, sourceLang = source.code, outputLang = target,
+                        onPhase = { phase -> onStage(translatePhaseStage(app, phase)) },
+                        onRequestSent = onRequestSent,
+                    )
+                    indexed.forEachIndexed { index, item ->
+                        result.getOrNull(index)?.takeIf { it.isNotBlank() }?.let { translations[item.index] = it }
+                    }
+                }
         } catch (e: CancellationException) {
             // 离开页面/重新进入导致协程取消:重抛,别把「Job was cancelled」当真实错误弹给用户
             throw e
@@ -233,31 +239,47 @@ object MangaPageTranslatePipeline {
                     s0.cx, s0.cy, s0.width, s0.height
                 )
             }
-            // 只擦"有译文"的 region,失败项保留日文原貌
-            val toErase = scaledRegions.filterIndexed { i, _ -> !translations[i].isNullOrBlank() }
-            TextEraser.eraseText(bitmap, toErase, textMask, pxScale)
+            // 气泡范围必须从尚未擦字的原图估计，否则涂平后的背景会让范围越界。
+            val renderBounds = scaledRegions.mapIndexed { i, region ->
+                if (translations[i].isNullOrBlank()) return@mapIndexed region
+                val bgColor = TextEraser.sampleBackgroundColor(bitmap, region, pxScale)
+                val b = BubbleAreaFinder.expand(bitmap, region, bgColor, pxScale)
+                val expanded = region.copy(corners = listOf(
+                    b[0].toFloat() to b[1].toFloat(), b[2].toFloat() to b[1].toFloat(),
+                    b[2].toFloat() to b[3].toFloat(), b[0].toFloat() to b[3].toFloat(),
+                ))
+                if (scaledRegions.indices.any { j -> j != i && overlaps(expanded, scaledRegions[j]) }) region else expanded
+            }
+            val drawableTranslations = translations.filter { (index, value) ->
+                index in renderBounds.indices && TextRenderer.canFit(value, renderBounds[index], pxScale)
+            }
+            // 只擦有可读译文的 region；长文放不下时保留原字。
+            val backgroundColors = scaledRegions.map { TextEraser.sampleBackgroundColor(bitmap, it, pxScale) }
+            val rendered = mutableMapOf<Int, String>()
+            drawableTranslations.forEach { (index, value) ->
+                if (TextEraser.eraseText(bitmap, listOf(scaledRegions[index]), textMask, pxScale,
+                        backgroundColors[index]) > 0)
+                    rendered[index] = value
+                else Timber.d("WriteBack: preserving region %d because no reliable erase mask", index)
+            }
+            require(rendered.isNotEmpty()) { "no region had both a fitting translation and a reliable erase mask" }
             val canvas = Canvas(bitmap)
             // 把每个有译文 region 的 corners 扩到气泡内部可写区域 —
             // OCR 框紧贴日文字符,远小于气泡,中文塞回去字号被压成蚂蚁;
             // 扩到气泡边界(BG 连通区域)后中文能用满整个气泡。
-            val regionsForRender = scaledRegions.mapIndexed { i, region ->
-                if (translations[i].isNullOrBlank()) return@mapIndexed region
-                val bgColor = TextEraser.sampleBackgroundColor(bitmap, region, pxScale)
-                val b = BubbleAreaFinder.expand(bitmap, region, bgColor, pxScale)
-                region.copy(
-                    corners = listOf(
-                        b[0].toFloat() to b[1].toFloat(),
-                        b[2].toFloat() to b[1].toFloat(),
-                        b[2].toFloat() to b[3].toFloat(),
-                        b[0].toFloat() to b[3].toFloat(),
-                    )
-                )
-            }
-            TextRenderer.renderTranslations(canvas, regionsForRender, translations, pxScale)
+            TextRenderer.renderTranslations(canvas, renderBounds, rendered, pxScale, bitmap)
             return writeTranslatedPng(app, bitmap, pageIndex)
         } finally {
             bitmap.recycle()
         }
+    }
+
+    private fun overlaps(a: OcrTextRegion, b: OcrTextRegion): Boolean {
+        val ax = a.corners.map { it.first }; val ay = a.corners.map { it.second }
+        val bx = b.corners.map { it.first }; val by = b.corners.map { it.second }
+        val w = (minOf(ax.max(), bx.max()) - maxOf(ax.min(), bx.min())).coerceAtLeast(0f)
+        val h = (minOf(ay.max(), by.max()) - maxOf(ay.min(), by.min())).coerceAtLeast(0f)
+        return w * h > minOf(a.width * a.height, b.width * b.height) * 0.05f
     }
 
     /**

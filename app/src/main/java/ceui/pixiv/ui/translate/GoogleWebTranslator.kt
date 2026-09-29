@@ -45,8 +45,14 @@ object GoogleWebTranslator : Translator {
         onPhase: ((AiTranslatePhase) -> Unit)?,
     ): String = withContext(Dispatchers.IO) {
         if (input.isBlank()) return@withContext input
-        callGtx(input, normalizeTargetLang(outputLang))
+        callGtx(input, SOURCE_LANG, normalizeTargetLang(outputLang))
     }
+
+    override suspend fun translateBatchFrom(
+        inputs: List<String>, sourceLang: String, outputLang: String,
+        onItem: ((Int, String) -> Unit)?, onPhase: ((AiTranslatePhase) -> Unit)?,
+        onRequestSent: (() -> Unit)?,
+    ): List<String> = translateBatchInternal(inputs, sourceLang, outputLang, onItem, null, onPhase)
 
     override suspend fun translateBatch(
         inputs: List<String>,
@@ -56,6 +62,12 @@ object GoogleWebTranslator : Translator {
         onPhase: ((AiTranslatePhase) -> Unit)?,
         // Google 免费端点不烧 Token,不需要「退出二次确认」信号,这里显式忽略。
         onRequestSent: (() -> Unit)?,
+    ): List<String> = translateBatchInternal(inputs, SOURCE_LANG, outputLang, onItem, onProgress, onPhase)
+
+    private suspend fun translateBatchInternal(
+        inputs: List<String>, sourceLang: String, outputLang: String,
+        onItem: ((Int, String) -> Unit)?, onProgress: ((Int, Int) -> Unit)?,
+        onPhase: ((AiTranslatePhase) -> Unit)?,
     ): List<String> = withContext(Dispatchers.IO) {
         if (inputs.isEmpty()) return@withContext emptyList()
 
@@ -71,7 +83,7 @@ object GoogleWebTranslator : Translator {
             var batchOk = false
             try {
                 val joined = slice.joinToString(JOIN_SEP)
-                val translated = callGtx(joined, tl)
+                val translated = callGtx(joined, sourceLang, tl)
                 val lines = translated.split(JOIN_SEP)
                 Timber.d(
                     "GoogleWebTranslator: chunk[%d,%d) sent %d lines, got %d lines back",
@@ -107,7 +119,7 @@ object GoogleWebTranslator : Translator {
                     coroutineContext.ensureActive()
                     val idx = from + j
                     val zh = try {
-                        callGtx(slice[j], tl)
+                        callGtx(slice[j], sourceLang, tl)
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
@@ -151,11 +163,11 @@ object GoogleWebTranslator : Translator {
         return out
     }
 
-    private suspend fun callGtx(text: String, targetLang: String): String {
+    private suspend fun callGtx(text: String, sourceLang: String, targetLang: String): String {
         // POST + form body,FormBody 自动 URL 编码 q 值,避免 GET URL 撑爆
         val form = FormBody.Builder()
             .add("client", "gtx")
-            .add("sl", SOURCE_LANG)
+            .add("sl", sourceLang)
             .add("tl", targetLang)
             .add("dt", "t")
             .add("q", text)

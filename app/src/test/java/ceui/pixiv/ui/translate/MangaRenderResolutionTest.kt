@@ -113,7 +113,9 @@ class MangaRenderResolutionTest {
         val file = File(tmp.root, "orig.png")
         Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
             eraseColor(Color.WHITE)
-            for (y in 1200 until 1400) for (x in 1400 until 1600) setPixel(x, y, Color.BLACK)
+            // Two thin glyph strokes, rather than a solid black artwork rectangle.
+            for (y in 1240 until 1360) for (x in 1460 until 1480) setPixel(x, y, Color.BLACK)
+            for (y in 1240 until 1360) for (x in 1520 until 1540) setPixel(x, y, Color.BLACK)
         }.also { bmp -> file.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) } }
         val region = OcrTextRegion(
             text = "原文", cx = 1500f, cy = 1300f, width = 200f, height = 200f,
@@ -131,7 +133,7 @@ class MangaRenderResolutionTest {
         assertEquals(w, bounds.outWidth)
         assertEquals(h, bounds.outHeight)
         val result = BitmapFactory.decodeFile(out.absolutePath)
-        // 原文黑块被擦,气泡里画上了译文(有非白像素),气泡外原样
+        // 原文笔画被擦,气泡里画上了译文(有非白像素),气泡外原样
         assertEquals(Color.WHITE, result.getPixel(1402, 1202))
         var ink = 0
         for (y in 1200 until 1400) for (x in 1400 until 1600) if (result.getPixel(x, y) != Color.WHITE) ink++

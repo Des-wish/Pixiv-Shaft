@@ -781,6 +781,15 @@
     <string name="string_translate_model_loading">번역 모델 불러오는 중…</string>
     <string name="string_ai_manga_translate_inline">만화 번역</string>
     <string name="string_ai_manga_translate_manual">영역 선택 번역</string>
+    <string name="manga_source_auto">원문 언어 자동 감지</string>
+    <string name="manga_source_ja">원문: 일본어</string>
+    <string name="manga_source_en">원문: 영어</string>
+    <string name="manga_source_ko">원문: 한국어</string>
+    <string name="manga_review_title">선택 영역 번역 확인</string>
+    <string name="manga_review_source">인식한 원문</string>
+    <string name="manga_review_translation">중국어 번역</string>
+    <string name="manga_review_apply">적용</string>
+    <string name="manga_review_reselect">영역 다시 선택</string>
     <string name="string_ai_manga_translate_batch">전체 페이지 번역</string>
     <string name="string_ai_manga_batch_loading_image">이미지 불러오는 중…</string>
     <string name="string_ai_manga_batch_summary">전체 번역 완료: %1$d페이지 번역, %2$d페이지 문자 없음, %3$d페이지 실패</string>

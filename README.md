@@ -169,10 +169,11 @@ Separate character from background in one tap, with edges clean down to single h
 <td width="50%" valign="top">
 
 #### 💬 Manga translation (OCR + MT)
-Detects speech bubbles automatically, translates in place and re-typesets; "translate the whole series" finishes multiple pages in one go and keeps running after you leave the viewer. Besides the built-in engine you can plug in your own OpenAI-compatible endpoint.
+Recognizes Japanese, Korean, and English manga text on-device and re-typesets a Chinese translation in place. You can choose the source language and correct text in a selected region; whole-series translation continues in the background. Traditional Chinese follows the app locale, while other locales use Simplified Chinese. Korean and English use a custom AI endpoint when enabled, otherwise Google translation.
 - Automatic bubble detection
 - Translate whole series · runs in background
 - Custom AI endpoint · streaming
+- Local background repair · readable text layout
 
 #### 🎞️ Ugoira frame interpolation (RIFE)
 RIFE interpolation adaptively brings ugoira up to 2× / 4×, close to the 50 fps ceiling; playback uses a frame-sequence player so motion no longer depends on the device.
@@ -200,11 +201,61 @@ A modern Android stack, Kotlin-first, with a clear architecture and an eye on pe
 git clone https://github.com/CeuiLiSA/Pixiv-Shaft.git
 cd Pixiv-Shaft
 
-./gradlew assembleDebug      # debug APK
-./gradlew assembleRelease    # release APK (needs a signing config)
+docker compose build android-builder
+docker compose up -d android-builder
+docker compose exec android-builder bash
 ```
 
-**Requirements:** JDK 17+, Android SDK 36 · Min SDK 24 (Android 7.0), Target SDK 36 (Android 16)
+Inside the container (`/workspace`):
+
+```bash
+bash scripts/docker-build.sh          # defaults to the Github debug APK
+bash scripts/docker-build.sh release  # Github release APK
+```
+
+Run the same unit-test set used by CI inside the container:
+
+```bash
+bash ./gradlew \
+  :app:testGithubDebugUnitTest \
+  :actionqueue:testDebugUnitTest \
+  :feeds:testDebugUnitTest \
+  :websocket:testDebugUnitTest \
+  :banner:testDebugUnitTest \
+  :panel:testDebugUnitTest \
+  :models:testDebugUnitTest \
+  :progressmanager:testDebugUnitTest \
+  :safe:testDebugUnitTest \
+  :witstudio:testDebugUnitTest \
+  --continue
+```
+
+Android instrumented tests additionally need an emulator/device visible to ADB. The GitHub workflow starts an API 35 emulator on its runner and connects the test container to that runner's ADB server; the default Windows Compose network does not expose a local USB device or emulator automatically.
+
+Stop the container but keep it listed in Docker Desktop with:
+
+```bash
+docker compose stop android-builder
+```
+
+Remove the container (the cache and APKs under `D:\docker\pixiv` remain) with:
+
+```bash
+docker compose down
+```
+
+**Requirements:** Docker Desktop with Docker Compose v2. Docker Desktop shows the Compose project and container as `pixiv`. The container provides JDK 17 and the Android SDK/NDK toolchain. Gradle caches are stored under `D:\docker\pixiv\gradle-cache`; APKs are exported to `D:\docker\pixiv\artifacts\apk`. Min SDK 24 (Android 7.0), Target SDK 36 (Android 16).
+
+For a production-signed release, place the keystore at `D:\docker\pixiv\keystore.jks` and set `storeFile=/container-data/keystore.jks` in the ignored root `keystore.properties`, along with the passwords and alias.
+
+If the build needs the community-events signing key, set `SHAFT_EVENTS_HMAC` in the host environment before starting the long-lived Compose service. Do not commit or bake the key into the image.
+
+To save a portable copy of the builder image on Windows, run this in PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force D:\docker\pixiv\images | Out-Null
+docker save --output D:\docker\pixiv\images\pixiv-shaft-android-builder.tar pixiv-shaft-android-builder:local
+```
 
 ## 💎 Plans
 

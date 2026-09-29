@@ -1,6 +1,7 @@
 package ceui.pixiv.ui.translate
 
 import android.graphics.Canvas
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
@@ -19,11 +20,25 @@ object TextRenderer {
 
     private const val PADDING_RATIO = 0.08f  // padding inside the bubble as fraction of dimension
     /** 二分搜起点 — 上限不行时再走 [scaleDownToFit] 兜底,允许更小字号防溢出 */
-    private const val MIN_FONT_SIZE = 6f
+    private const val MIN_FONT_SIZE = 10f
     private const val MAX_FONT_SIZE = 80f
     /** 极端兜底字号下限,小到这个值还塞不下就只能让它溢出/被裁(罕见) */
-    private const val ABSOLUTE_MIN_FONT_SIZE = 2f
+    private const val ABSOLUTE_MIN_FONT_SIZE = 10f
     private const val LINE_SPACING_MULT = 1.15f
+
+    /** 在擦原字之前检查译文是否能以可读字号放进区域。 */
+    fun canFit(text: String, region: OcrTextRegion, pxScale: Float = 1f): Boolean {
+        val xs = region.corners.map { it.first }
+        val ys = region.corners.map { it.second }
+        if (xs.size < 4 || ys.size < 4) return false
+        val width = (xs.max() - xs.min()) * (1f - 2f * PADDING_RATIO)
+        val height = (ys.max() - ys.min()) * (1f - 2f * PADDING_RATIO)
+        if (width <= 0f || height <= 0f) return false
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.DEFAULT_BOLD; textSize = MIN_FONT_SIZE * pxScale }
+        val lines = wrapTextHorizontal(paint, text, width)
+        return lines.isNotEmpty() && lines.size * paint.textSize * LINE_SPACING_MULT <= height &&
+            lines.all { paint.measureText(it) <= width + 1f }
+    }
 
     /**
      * Render translated text for each OCR region onto the canvas.
@@ -38,6 +53,7 @@ object TextRenderer {
         regions: List<OcrTextRegion>,
         translations: Map<Int, String>,
         pxScale: Float = 1f,
+        backgroundBitmap: Bitmap? = null,
     ) {
         val paint = Paint().apply {
             color = Color.BLACK
@@ -61,7 +77,7 @@ object TextRenderer {
         var drawn = 0
         for ((index, region) in regions.withIndex()) {
             val text = translations[index] ?: continue
-            if (text.isBlank()) continue
+            if (text.isBlank() || !canFit(text, region, pxScale)) continue
 
             val corners = region.corners
             if (corners.size < 4) continue
@@ -81,7 +97,7 @@ object TextRenderer {
             if (innerWidth <= 0 || innerHeight <= 0) continue
 
             // Determine text color: use dark text on light background, light text on dark background
-            val bgBrightness = estimateBackgroundBrightness(canvas, regionLeft, regionTop, regionWidth, regionHeight)
+            val bgBrightness = estimateBackgroundBrightness(backgroundBitmap, regionLeft, regionTop, regionWidth, regionHeight)
             if (bgBrightness < 128) {
                 paint.color = Color.WHITE
                 strokePaint.color = Color.BLACK
@@ -215,18 +231,31 @@ object TextRenderer {
         val lines = mutableListOf<String>()
         val sb = StringBuilder()
 
-        for (ch in text) {
+        val tokens = if (text.any { it.isWhitespace() })
+            Regex("\\s+|\\S+").findAll(text).map { it.value }.toList()
+        else text.map { it.toString() }
+        for (token in tokens) {
+            if (token == "\n") {
+                lines.add(sb.toString().trim())
+                sb.clear()
+                continue
+            }
+            if (token.firstOrNull()?.isWhitespace() == true && sb.isEmpty()) continue
+            val ch = token
             sb.append(ch)
             if (paint.measureText(sb.toString()) > maxWidth) {
-                if (sb.length > 1) {
-                    // Push back the last char, end the line
-                    lines.add(sb.substring(0, sb.length - 1))
-                    sb.clear()
-                    sb.append(ch)
+                if (sb.length > ch.length) {
+                    lines.add(sb.substring(0, sb.length - ch.length).trimEnd())
+                    sb.clear(); sb.append(ch.trimStart())
                 } else {
-                    // Single char exceeds width; force it onto its own line
-                    lines.add(sb.toString())
-                    sb.clear()
+                    // A single long word is split only when it cannot fit on an empty line.
+                    val word = sb.toString(); sb.clear()
+                    for (letter in word) {
+                        if (sb.isNotEmpty() && paint.measureText(sb.toString() + letter) > maxWidth) {
+                            lines.add(sb.toString()); sb.clear()
+                        }
+                        sb.append(letter)
+                    }
                 }
             }
         }
@@ -241,7 +270,9 @@ object TextRenderer {
         while (i < lines.size) {
             val cur = lines[i]
             if (cur.isNotEmpty() && cur[0] in NO_LINE_START) {
-                lines[i - 1] = lines[i - 1] + cur[0]
+                val candidate = lines[i - 1] + cur[0]
+                if (paint.measureText(candidate) > maxWidth + 1f) { i++; continue }
+                lines[i - 1] = candidate
                 if (cur.length == 1) {
                     lines.removeAt(i)
                     // 不 i++,下一行可能也以禁则字符开头,再来一轮
@@ -260,10 +291,12 @@ object TextRenderer {
      * Estimate background brightness by sampling the center of a region.
      */
     private fun estimateBackgroundBrightness(
-        canvas: Canvas, left: Float, top: Float, width: Float, height: Float
+        bitmap: Bitmap?, left: Float, top: Float, width: Float, height: Float
     ): Int {
-        // We can't easily read pixels from canvas, so use a heuristic:
-        // Default to assuming light background (most manga speech bubbles are white)
-        return 240
+        if (bitmap == null) return 240
+        val x = (left + width / 2f).toInt().coerceIn(0, bitmap.width - 1)
+        val y = (top + height / 2f).toInt().coerceIn(0, bitmap.height - 1)
+        val pixel = bitmap.getPixel(x, y)
+        return (Color.red(pixel) * 77 + Color.green(pixel) * 150 + Color.blue(pixel) * 29) shr 8
     }
 }

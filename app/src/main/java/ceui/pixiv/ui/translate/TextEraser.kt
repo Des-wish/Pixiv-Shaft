@@ -2,6 +2,12 @@ package ceui.pixiv.ui.translate
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import org.opencv.android.OpenCVLoader
+import org.opencv.android.Utils
+import org.opencv.core.CvType
+import org.opencv.core.Mat
+import org.opencv.imgproc.Imgproc
+import org.opencv.photo.Photo
 import ceui.pixiv.ui.upscale.OcrTextRegion
 import timber.log.Timber
 import kotlin.math.abs
@@ -53,7 +59,8 @@ object TextEraser {
         regions: List<OcrTextRegion>,
         textMask: TextMask? = null,
         pxScale: Float = 1f,
-    ) {
+        backgroundOverride: Int? = null,
+    ): Int {
         require(bitmap.isMutable) { "eraseText needs a mutable bitmap" }
         val mask = textMask?.takeIf { it.width > 0 && it.height > 0 }
         val pad = scaledPx(AABB_PAD_PX, pxScale)
@@ -64,14 +71,17 @@ object TextEraser {
             if (mask != null) "mask ${mask.width}x${mask.height}" else "threshold-fallback", pxScale
         )
         // 先采完再擦:相邻 region 的采样圈可能压到前一个刚擦过的像素上
-        val bgColors = regions.map { sampleBackgroundColor(bitmap, it, pxScale) }
+        val bgColors = regions.map { backgroundOverride ?: sampleBackgroundColor(bitmap, it, pxScale) }
+        var totalErased = 0
         for ((i, region) in regions.withIndex()) {
             val bgColor = bgColors[i]
             val erased = if (mask != null) {
                 eraseRegionByMask(bitmap, region, bgColor, mask, pad, dilate)
+                    .takeIf { it > 0 } ?: eraseRegionByThreshold(bitmap, region, bgColor, pad, dilate)
             } else {
                 eraseRegionByThreshold(bitmap, region, bgColor, pad, dilate)
             }
+            totalErased += erased
             if (i < 2) {
                 val xs = region.corners.map { it.first }
                 val ys = region.corners.map { it.second }
@@ -81,6 +91,7 @@ object TextEraser {
                 )
             }
         }
+        return totalErased
     }
 
     /**
@@ -100,25 +111,36 @@ object TextEraser {
         val maskData = textMask.data
         val maskW = textMask.width
         val maskH = textMask.height
-        val maskCols = IntArray(w) { dx -> ((x0 + dx).toLong() * maskW / bmp.width).toInt().coerceIn(0, maskW - 1) }
+        val coverage = textMask.coverage
+        val maskCols = IntArray(w) { dx ->
+            if (coverage == null) ((x0 + dx).toLong() * maskW / bmp.width).toInt().coerceIn(0, maskW - 1)
+            else ((x0 + dx - coverage.left).toLong() * maskW / (coverage.right - coverage.left).coerceAtLeast(1)).toInt()
+        }
         var local = BooleanArray(w * h)
         for (dy in 0 until h) {
-            val maskRow = ((y0 + dy).toLong() * maskH / bmp.height).toInt().coerceIn(0, maskH - 1) * maskW
+            val maskY = if (coverage == null) ((y0 + dy).toLong() * maskH / bmp.height).toInt().coerceIn(0, maskH - 1)
+                else ((y0 + dy - coverage.top).toLong() * maskH / (coverage.bottom - coverage.top).coerceAtLeast(1)).toInt()
+            if (maskY !in 0 until maskH) continue
+            val maskRow = maskY * maskW
             val dstRow = dy * w
             for (dx in 0 until w) {
-                if (maskData[maskRow + maskCols[dx]].toInt() != 0) local[dstRow + dx] = true
+                val mx = maskCols[dx]
+                if (mx in 0 until maskW && maskData[maskRow + mx].toInt() != 0) local[dstRow + dx] = true
             }
         }
-        repeat(dilate) { local = dilate8(local, w, h) }
-
         val pixels = IntArray(w * h)
         bmp.getPixels(pixels, 0, w, x0, y0, w, h)
-        var painted = 0
-        for (idx in local.indices) {
-            if (local[idx]) { pixels[idx] = bgColor; painted++ }
+        // The segmentation head often misses antialiased glyph edges. Add nearby dark/light
+        // pixels that differ from the sampled bubble background, but never scan the whole box.
+        val nearby = dilate8(dilate8(local, w, h), w, h)
+        val bgR = Color.red(bgColor); val bgG = Color.green(bgColor); val bgB = Color.blue(bgColor)
+        for (i in local.indices) if (nearby[i]) {
+            val p = pixels[i]
+            if (maxOf(abs(Color.red(p) - bgR), abs(Color.green(p) - bgG),
+                    abs(Color.blue(p) - bgB)) > INK_THRESHOLD / 2) local[i] = true
         }
-        bmp.setPixels(pixels, 0, w, x0, y0, w, h)
-        return painted
+        repeat(dilate) { local = dilate8(local, w, h) }
+        return repairRegion(bmp, pixels, local, x0, y0, w, h, bgColor)
     }
 
     /**
@@ -151,10 +173,60 @@ object TextEraser {
         }
         repeat(dilate) { mask = dilate8(mask, w, h) }
 
-        var painted = 0
-        for (idx in mask.indices) {
-            if (mask[idx]) { pixels[idx] = bgColor; painted++ }
+        // A color threshold cannot distinguish ink from artwork on a textured background.
+        if (mask.count { it } > mask.size * 0.32f || backgroundSpread(pixels, mask) > 28) {
+            Timber.d("TextEraser: unreliable threshold mask on textured region, preserving original")
+            return 0
         }
+        return repairRegion(bmp, pixels, mask, x0, y0, w, h, bgColor)
+    }
+
+    private fun backgroundSpread(pixels: IntArray, mask: BooleanArray): Int {
+        var min = 255
+        var max = 0
+        var count = 0
+        for (i in pixels.indices step maxOf(1, pixels.size / 128)) {
+            if (mask[i]) continue
+            val p = pixels[i]
+            val luma = (Color.red(p) * 77 + Color.green(p) * 150 + Color.blue(p) * 29) shr 8
+            min = minOf(min, luma)
+            max = maxOf(max, luma)
+            count++
+        }
+        return if (count == 0) 255 else max - min
+    }
+
+    /** Flat bubbles are filled exactly; textured bubbles use local Telea inpainting. */
+    private fun repairRegion(bmp: Bitmap, pixels: IntArray, mask: BooleanArray,
+        x0: Int, y0: Int, w: Int, h: Int, bgColor: Int): Int {
+        val painted = mask.count { it }
+        if (painted == 0) return 0
+        if (backgroundSpread(pixels, mask) > 18 && runCatching {
+                require(OpenCVLoader.initLocal())
+                val patch = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                val rgba = Mat()
+                val rgb = Mat()
+                val maskMat = Mat(h, w, CvType.CV_8UC1)
+                val repaired = Mat()
+                val result = Mat()
+                try {
+                    patch.setPixels(pixels, 0, w, 0, 0, w, h)
+                    Utils.bitmapToMat(patch, rgba)
+                    Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB)
+                    maskMat.put(0, 0, ByteArray(mask.size) { if (mask[it]) 255.toByte() else 0 })
+                    Photo.inpaint(rgb, maskMat, repaired, 3.0, Photo.INPAINT_TELEA)
+                    Imgproc.cvtColor(repaired, result, Imgproc.COLOR_RGB2RGBA)
+                    Utils.matToBitmap(result, patch)
+                    patch.getPixels(pixels, 0, w, 0, 0, w, h)
+                } finally {
+                    patch.recycle(); rgba.release(); rgb.release(); maskMat.release()
+                    repaired.release(); result.release()
+                }
+            }.onFailure { Timber.w(it, "TextEraser: inpaint failed, using local fill") }.isSuccess) {
+            bmp.setPixels(pixels, 0, w, x0, y0, w, h)
+            return painted
+        }
+        for (i in mask.indices) if (mask[i]) pixels[i] = bgColor
         bmp.setPixels(pixels, 0, w, x0, y0, w, h)
         return painted
     }

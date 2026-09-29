@@ -13,7 +13,9 @@ import ceui.lisa.BuildConfig
 import ceui.lisa.R
 import ceui.pixiv.ui.translate.ComicTextDetector
 import ceui.pixiv.ui.translate.DetectionBox
+import ceui.pixiv.ui.translate.DetectionResult
 import ceui.pixiv.ui.translate.MangaTranslateModels
+import ceui.pixiv.ui.translate.MangaSourceLanguage
 import ceui.pixiv.ui.translate.TextMask
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -40,6 +42,7 @@ data class OcrTextRegion(
     val prob: Float, // detection 置信(框是否真是文本框)
     val corners: List<Pair<Float, Float>>,
     val recogConfidence: Float = 1f, // manga-ocr 重识别置信(模型自己对识别多确定)
+    val sourceLanguage: MangaSourceLanguage = MangaSourceLanguage.JAPANESE,
 )
 
 /** 把 region 所有空间字段等比缩放,用于 sample 升/降到目标坐标系。 */
@@ -67,6 +70,61 @@ data class MangaOcrResult(
 )
 
 object MangaOcr {
+
+    private fun overlapFraction(a: OcrTextRegion, b: OcrTextRegion): Float {
+        val left = maxOf(a.cx - a.width / 2, b.cx - b.width / 2)
+        val top = maxOf(a.cy - a.height / 2, b.cy - b.height / 2)
+        val right = minOf(a.cx + a.width / 2, b.cx + b.width / 2)
+        val bottom = minOf(a.cy + a.height / 2, b.cy + b.height / 2)
+        val intersection = (right - left).coerceAtLeast(0f) * (bottom - top).coerceAtLeast(0f)
+        return intersection / minOf(a.width * a.height, b.width * b.height).coerceAtLeast(1f)
+    }
+
+    private fun boxIou(a: OcrTextRegion, b: OcrTextRegion): Float {
+        val l = maxOf(a.cx - a.width / 2, b.cx - b.width / 2)
+        val t = maxOf(a.cy - a.height / 2, b.cy - b.height / 2)
+        val r = minOf(a.cx + a.width / 2, b.cx + b.width / 2)
+        val bottom = minOf(a.cy + a.height / 2, b.cy + b.height / 2)
+        val intersection = (r - l).coerceAtLeast(0f) * (bottom - t).coerceAtLeast(0f)
+        return intersection / (a.width * a.height + b.width * b.height - intersection).coerceAtLeast(1f)
+    }
+
+    /** 长页的整页 1024 输入会压没小字；重叠分块补框及像素遮罩。 */
+    private suspend fun detectWithTiles(models: MangaTranslateModels, bitmap: Bitmap): DetectionResult {
+        val whole = models.detector.detect(bitmap)
+        val w = bitmap.width
+        val h = bitmap.height
+        if (maxOf(w, h) <= 1800) return whole
+        val merged = whole.boxes.toMutableList()
+        val mask = whole.textMask?.data?.copyOf() ?: ByteArray(w * h)
+        var hasMask = whole.textMask != null
+        val tileSize = 1400
+        val step = 1200
+        fun starts(length: Int): List<Int> = if (length <= 1800) listOf(0)
+            else (0 until length step step).map { minOf(it, length - tileSize) }.distinct()
+        for (y in starts(h)) for (x in starts(w)) {
+            coroutineContext.ensureActive()
+            val tw = minOf(if (w <= 1800) w else tileSize, w - x)
+            val th = minOf(if (h <= 1800) h else tileSize, h - y)
+            val crop = Bitmap.createBitmap(bitmap, x, y, tw, th)
+            val part = try { models.detector.detect(crop) } finally { crop.recycle() }
+            for (box in part.boxes) {
+                val shifted = box.copy(cx = box.cx + x, cy = box.cy + y)
+                val r = shifted.toOcrTextRegion()
+                val duplicate = merged.indexOfFirst { overlapFraction(it.toOcrTextRegion(), r) > 0.65f }
+                if (duplicate < 0) merged += shifted
+                else if (merged[duplicate].confidence < shifted.confidence) merged[duplicate] = shifted
+            }
+            part.textMask?.let { tileMask ->
+                hasMask = true
+                for (row in 0 until th) for (col in 0 until tw) {
+                    if (tileMask.data[row * tw + col].toInt() != 0) mask[(y + row) * w + x + col] = 1
+                }
+            }
+        }
+        Timber.d("MangaOcr: tiled detection %d → %d boxes", whole.boxes.size, merged.size)
+        return DetectionResult(merged, if (hasMask) TextMask(w, h, mask) else null)
+    }
 
     /**
      * CTD 检测置信下限。CTD 自身已在 [ComicTextDetector] 做了 0.4 阈值 + NMS,
@@ -125,6 +183,7 @@ object MangaOcr {
         context: Context,
         models: MangaTranslateModels,
         inputFile: File,
+        sourceHint: MangaSourceLanguage = MangaSourceLanguage.AUTO,
         onProgress: ((stage: String, fraction: Float) -> Unit)? = null
     ): MangaOcrResult? = withContext(Dispatchers.IO) {
         // 整段 OCR 是秒级阻塞工作,必须在这里逐段检查取消,否则页面销毁后
@@ -163,9 +222,10 @@ object MangaOcr {
             onProgress?.invoke(context.getString(R.string.string_ai_ocr_detecting), Float.NaN)
 
             coroutineContext.ensureActive()
-            val detResult = models.detector.detect(bitmap!!)
+            val detResult = detectWithTiles(models, bitmap!!)
             coroutineContext.ensureActive()
             val rawRegions = detResult.boxes.map { it.toOcrTextRegion() }
+            val supplemental = ceui.pixiv.ui.translate.MangaMultilingualOcr.recognize(bitmap!!, sourceHint)
             Timber.d("MangaOcr: CTD returned ${rawRegions.size} regions, mask=${detResult.textMask?.let { "${it.width}x${it.height}" } ?: "null"}")
 
             // debug 图只在 debug build 走相册落盘 — release 不能给用户相册塞调试 PNG
@@ -176,7 +236,10 @@ object MangaOcr {
             val minShort = minRegionShortSide(minOf(bitmap!!.width, bitmap!!.height))
             val viableRegions = rawRegions.filter { r ->
                 val short = minOf(r.width, r.height)
-                r.prob >= MIN_DETECTION_PROB && short >= minShort
+                val accepted = r.prob >= MIN_DETECTION_PROB && short >= minShort
+                if (!accepted) Timber.d("MangaOcr: filtered detection prob=%.2f short=%.1f", r.prob, short)
+                accepted && (sourceHint == MangaSourceLanguage.AUTO || sourceHint == MangaSourceLanguage.JAPANESE) &&
+                    supplemental.none { it.sourceLanguage != MangaSourceLanguage.JAPANESE && boxIou(r, it) > 0.55f }
             }
             Timber.d(
                 "MangaOcr: detection ${rawRegions.size} → viable ${viableRegions.size} " +
@@ -201,7 +264,10 @@ object MangaOcr {
                             (if (trimmed != result.text) " trimmed→[$trimmed]" else "") +
                             " conf=%.2f".format(result.confidence)
                     )
-                    if (trimmed.isBlank()) null
+                    if (trimmed.isBlank()) {
+                        Timber.d("MangaOcr: empty recognition @ %.0f,%.0f", region.cx, region.cy)
+                        null
+                    }
                     else region.copy(text = trimmed, recogConfidence = result.confidence)
                 } catch (e: CancellationException) {
                     // 页面销毁取消:必须重抛,不能被当成「该 region 识别失败」吞掉继续跑
@@ -216,14 +282,26 @@ object MangaOcr {
             coroutineContext.ensureActive()
             onProgress?.invoke(context.getString(R.string.string_ai_ocr_done), 1f)
 
-            val confident = enhanced.filter { it.recogConfidence >= MIN_RECOG_CONFIDENCE }
+            val confident = enhanced.filter {
+                val accepted = it.recogConfidence >= MIN_RECOG_CONFIDENCE
+                if (!accepted) Timber.d("MangaOcr: filtered low OCR confidence %.2f @ %.0f,%.0f",
+                    it.recogConfidence, it.cx, it.cy)
+                accepted
+            }
             Timber.d("MangaOcr: ${enhanced.size} → ${confident.size} after recog-confidence filter (>=$MIN_RECOG_CONFIDENCE)")
 
             // 坐标系归一:CTD/recognize 是在 sample 后 bitmap 上跑的,这里乘回 sample
             // 把 region 转成"原图分辨率"坐标,下游(渲染/回填)统一基于原图坐标处理。
-            val finalRegions = confident
-                .filter { it.isMeaningfulJapanese() }
-                .let { mangaReadingOrder(it) }
+            val japaneseRegions = confident
+                .filter {
+                    val accepted = it.isMeaningfulJapanese()
+                    if (!accepted) Timber.d("MangaOcr: filtered Japanese text rule @ %.0f,%.0f", it.cx, it.cy)
+                    accepted
+                }
+            val extras = supplemental.filter { candidate ->
+                japaneseRegions.none { overlapFraction(it, candidate) > 0.55f }
+            }
+            val finalRegions = mangaReadingOrder(japaneseRegions + extras)
                 .map { it.scaledBy(sample.toFloat()) }
             if (sample > 1 && finalRegions.isNotEmpty()) {
                 val sample0 = finalRegions[0]

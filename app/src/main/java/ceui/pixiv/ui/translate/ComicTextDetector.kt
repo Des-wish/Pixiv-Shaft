@@ -63,11 +63,16 @@ data class TextMask(
     val height: Int,
     /** length = width * height,每个元素 0 或 1。 */
     val data: ByteArray,
+    /** Optional bounds in the render bitmap for a mask produced from a manual crop. */
+    val coverage: MaskCoverage? = null,
 ) {
     override fun equals(other: Any?): Boolean =
-        other is TextMask && other.width == width && other.height == height && other.data.contentEquals(data)
-    override fun hashCode(): Int = (width * 31 + height) * 31 + data.contentHashCode()
+        other is TextMask && other.width == width && other.height == height &&
+            other.coverage == coverage && other.data.contentEquals(data)
+    override fun hashCode(): Int = ((width * 31 + height) * 31 + data.contentHashCode()) * 31 + (coverage?.hashCode() ?: 0)
 }
+
+data class MaskCoverage(val left: Int, val top: Int, val right: Int, val bottom: Int)
 
 /**
  * comic-text-detector 会话。普通 class,进程内共用的那份由 [MangaTranslateModels] 持有。

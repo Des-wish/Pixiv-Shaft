@@ -781,6 +781,15 @@
     <string name="string_translate_model_loading">翻訳モデルを読み込み中…</string>
     <string name="string_ai_manga_translate_inline">マンガ翻訳</string>
     <string name="string_ai_manga_translate_manual">範囲選択して翻訳</string>
+    <string name="manga_source_auto">原文の言語を自動判定</string>
+    <string name="manga_source_ja">原文：日本語</string>
+    <string name="manga_source_en">原文：英語</string>
+    <string name="manga_source_ko">原文：韓国語</string>
+    <string name="manga_review_title">選択範囲の翻訳を確認</string>
+    <string name="manga_review_source">認識した原文</string>
+    <string name="manga_review_translation">中国語訳</string>
+    <string name="manga_review_apply">適用</string>
+    <string name="manga_review_reselect">範囲を選び直す</string>
     <string name="string_ai_manga_translate_batch">全ページを翻訳</string>
     <string name="string_ai_manga_batch_loading_image">画像を読み込み中…</string>
     <string name="string_ai_manga_batch_summary">全ページ翻訳完了：%1$d ページ翻訳、%2$d ページ文字なし、%3$d ページ失敗</string>

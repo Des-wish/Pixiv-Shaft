@@ -171,13 +171,14 @@ class MangaBatchTranslateCenter(app: Context, private val models: MangaTranslate
         pageUrls: List<String?>,
         ocrModel: MangaOcrModel,
         ctdModel: ComicTextDetectorModel,
+        sourceHint: MangaSourceLanguage = MangaSourceLanguage.AUTO,
     ): Boolean {
         if (isRunning || singlePageBusy) return false
         cancelledByUser = false
         currentIllust = illust
         job = scope.launch {
             try {
-                runBatch(illust, pageUrls, ocrModel, ctdModel)
+                runBatch(illust, pageUrls, ocrModel, ctdModel, sourceHint)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -210,6 +211,7 @@ class MangaBatchTranslateCenter(app: Context, private val models: MangaTranslate
         pageUrls: List<String?>,
         ocrModel: MangaOcrModel,
         ctdModel: ComicTextDetectorModel,
+        sourceHint: MangaSourceLanguage,
     ) {
         val illustId = illust.id
         val title = illust.title.orEmpty()
@@ -224,7 +226,8 @@ class MangaBatchTranslateCenter(app: Context, private val models: MangaTranslate
                 _status.postValue(BatchStatus(illustId, title, done, total, s.text, s.progressPercent))
             }
             // 已有译图的页(之前单页翻过 / 圈选过 / 上次整批翻过)跳过,不重复烧额度
-            if (bucket(illustId).value?.get(pageIndex)?.let { File(it).exists() } == true) {
+            if (sourceHint == MangaSourceLanguage.AUTO &&
+                bucket(illustId).value?.get(pageIndex)?.let { File(it).exists() } == true) {
                 skipped++
                 continue
             }
@@ -242,7 +245,8 @@ class MangaBatchTranslateCenter(app: Context, private val models: MangaTranslate
                 failed++
                 continue
             }
-            when (val outcome = MangaPageTranslatePipeline.translatePage(app, models, file, pageIndex, ocrModel, ctdModel, post)) {
+            when (val outcome = MangaPageTranslatePipeline.translatePage(app, models, file, pageIndex, ocrModel, ctdModel,
+                post, sourceHint = sourceHint)) {
                 is MangaPageTranslatePipeline.Outcome.Done -> {
                     publish(illustId, pageIndex, outcome.outFile.absolutePath)
                     translated++

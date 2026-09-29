@@ -4,6 +4,10 @@ import android.app.Application
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.BitmapFactory
+import android.graphics.BitmapRegionDecoder
+import android.graphics.Paint
+import android.graphics.Rect
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MediatorLiveData
@@ -15,16 +19,24 @@ import ceui.pixiv.services.appServices
 import ceui.pixiv.utils.asLiveData
 import ceui.pixiv.ui.translate.ComicTextDetectorModel
 import ceui.pixiv.ui.translate.MangaOcrModel
+import ceui.pixiv.ui.translate.OcrResult
 import ceui.pixiv.ui.translate.MangaBatchTranslateCenter
 import ceui.pixiv.ui.translate.MangaPageTranslatePipeline
+import ceui.pixiv.ui.translate.MangaSourceLanguage
+import ceui.pixiv.ui.translate.MangaMultilingualOcr
+import ceui.pixiv.ui.translate.MaskCoverage
+import ceui.pixiv.ui.translate.TextMask
+import ceui.pixiv.ui.translate.mangaTargetLanguage
+import ceui.pixiv.ui.translate.mangaTranslator
+import ceui.pixiv.ui.translate.mangaSourceOfText
 import ceui.pixiv.ui.translate.MangaPageTranslatePipeline.Stage
 import ceui.pixiv.ui.translate.TextEraser
 import ceui.pixiv.ui.translate.TextRenderer
 import ceui.pixiv.ui.translate.appTranslateTargetLang
-import ceui.pixiv.ui.translate.currentTranslator
 import ceui.pixiv.ui.translate.promptTranslateFailedIfPossible
 import ceui.pixiv.ui.upscale.OcrTextRegion
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -33,7 +45,7 @@ import timber.log.Timber
 import java.io.File
 
 /**
- * 二级详情「翻译漫画」一站式 pipeline:OCR → Google batch 翻译 → 译文回填到原图气泡位置 →
+ * 二级详情「翻译漫画」一站式 pipeline:OCR → 按源语言翻译 → 译文回填到原图气泡位置 →
  * 把产物图路径喂回 [translatedPaths],由 FragmentImageDetail 替换显示。
  *
  * 设计:
@@ -90,6 +102,18 @@ class ImageTranslationViewModel(application: Application) : AndroidViewModel(app
     /** 「翻译已取消」toast 是否已弹过,避免 cancelActiveWorkflow 与协程收尾各弹一次。 */
     private var cancelToastShown = false
 
+    data class ManualReview(val pageIndex: Int, val sourceText: String, val translatedText: String)
+    data class ManualCorrection(val sourceText: String, val translatedText: String)
+    private val _manualReview = MutableLiveData<ManualReview?>(null)
+    val manualReview: LiveData<ManualReview?> get() = _manualReview
+    private var manualReviewReply: CompletableDeferred<ManualCorrection?>? = null
+
+    fun completeManualReview(correction: ManualCorrection?) {
+        manualReviewReply?.complete(correction)
+        manualReviewReply = null
+        _manualReview.value = null
+    }
+
     /**
      * 是否已向 AI 接口发起请求(POST 即将送出,Token 可能已开始烧)。
      * 只在 AiTranslator 触发,Google 免费端点不会置位;置位后退出要二次确认。
@@ -103,11 +127,12 @@ class ImageTranslationViewModel(application: Application) : AndroidViewModel(app
      * 进完立刻 [consumeManualSelectionRequest] 置空防止旋转/重订阅重复触发。
      * 用 activity-scoped VM 单一来源派发,避免 Activity 直接持 Fragment 引用。
      */
-    private val _manualSelectionRequest = MutableLiveData<Int?>(null)
-    val manualSelectionRequest: LiveData<Int?> get() = _manualSelectionRequest.asLiveData()
+    data class ManualSelectionRequest(val pageIndex: Int, val sourceHint: MangaSourceLanguage)
+    private val _manualSelectionRequest = MutableLiveData<ManualSelectionRequest?>(null)
+    val manualSelectionRequest: LiveData<ManualSelectionRequest?> get() = _manualSelectionRequest.asLiveData()
 
-    fun requestManualSelection(pageIndex: Int) {
-        _manualSelectionRequest.value = pageIndex
+    fun requestManualSelection(pageIndex: Int, sourceHint: MangaSourceLanguage) {
+        _manualSelectionRequest.value = ManualSelectionRequest(pageIndex, sourceHint)
     }
 
     fun consumeManualSelectionRequest() {
@@ -145,6 +170,7 @@ class ImageTranslationViewModel(application: Application) : AndroidViewModel(app
         pageIndex: Int,
         ocrModel: MangaOcrModel,
         ctdModel: ComicTextDetectorModel,
+        sourceHint: MangaSourceLanguage = MangaSourceLanguage.AUTO,
     ): Boolean {
         if (_running.value == true) return false
         if (!batchCenter.beginSinglePage()) return false
@@ -158,6 +184,7 @@ class ImageTranslationViewModel(application: Application) : AndroidViewModel(app
                     app, models, imageFile, pageIndex, ocrModel, ctdModel,
                     onStage = { _status.postValue(it) },
                     onRequestSent = { aiRequestSent = true },
+                    sourceHint = sourceHint,
                 )
                 if (outcome is MangaPageTranslatePipeline.Outcome.Done) {
                     publishTranslated(pageIndex, outcome.outFile.absolutePath)
@@ -220,6 +247,7 @@ class ImageTranslationViewModel(application: Application) : AndroidViewModel(app
         normRight: Float,
         normBottom: Float,
         ocrModel: MangaOcrModel,
+        sourceHint: MangaSourceLanguage = MangaSourceLanguage.AUTO,
     ): Boolean {
         if (_running.value == true) return false
         if (!batchCenter.beginSinglePage()) return false
@@ -229,7 +257,7 @@ class ImageTranslationViewModel(application: Application) : AndroidViewModel(app
         aiRequestSent = false
         pipelineJob = viewModelScope.launch {
             try {
-                runManualPipeline(originalFile, pageIndex, normLeft, normTop, normRight, normBottom, ocrModel)
+                runManualPipeline(originalFile, pageIndex, normLeft, normTop, normRight, normBottom, ocrModel, sourceHint)
             } catch (e: CancellationException) {
                 if (cancelledByUser) maybeToastCancelled()
                 throw e
@@ -255,11 +283,12 @@ class ImageTranslationViewModel(application: Application) : AndroidViewModel(app
         pageIndex: Int,
         l: Float, t: Float, r: Float, b: Float,
         ocrModel: MangaOcrModel,
+        sourceHint: MangaSourceLanguage,
     ) {
-        // 1. 只需 manga-ocr 模型(CTD 仅自动检测用),按需加载
-        if (!models.isOcrLoaded) {
+        // 1. 圈选也加载 CTD：用文字像素遮罩准确擦字。
+        if (!models.isLoaded) {
             _status.postValue(Stage(app.getString(R.string.string_ai_ocr_loading_model)))
-            if (!models.ensureOcrLoaded(ocrModel)) {
+            if (!models.ensureLoaded(ocrModel, ComicTextDetectorModel.CTD_BASE)) {
                 if (!cancelledByUser) Common.showToast(R.string.string_ai_ocr_failed)
                 return
             }
@@ -274,7 +303,7 @@ class ImageTranslationViewModel(application: Application) : AndroidViewModel(app
         _status.postValue(Stage(app.getString(R.string.string_ai_manga_manual_recognizing)))
         val ocr = withContext(Dispatchers.IO) {
             try {
-                recognizeManualRegion(baseFile, l, t, r, b)
+                recognizeManualRegion(baseFile, originalFile, l, t, r, b, sourceHint)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -287,35 +316,44 @@ class ImageTranslationViewModel(application: Application) : AndroidViewModel(app
             return
         }
         try {
-            if (ocr.text.isBlank()) {
-                if (!cancelledByUser) Common.showToast(R.string.string_ai_ocr_empty)
-                return
-            }
-
-            // 4. 翻译(单条)
+            // Empty OCR can still be repaired by typing the original text in the review dialog.
             _status.postValue(Stage(app.getString(R.string.ocr_translating)))
-            val translated = try {
-                translateSingle(ocr.text, app)
+            var translated = if (ocr.text.isBlank()) "" else try {
+                translateSingle(ocr.text, app, ocr.region.sourceLanguage)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (cancelledByUser) {
-                    Timber.d(e, "ImageTranslationVM: manual translate error after user cancelled, ignored")
-                } else {
-                    Timber.e(e, "manual: translate failed")
-                    promptTranslateFailedIfPossible(e)
-                }
-                return
+                Timber.w(e, "manual: translation unavailable, allowing manual correction")
+                ""
             }
-            if (translated.isBlank()) {
-                if (!cancelledByUser) promptTranslateFailedIfPossible(null)
-                return
-            }
+
+            // Let the reader fix OCR/translation before changing any pixels. The selected box
+            // is the editable geometry; choosing “reselect” returns to the selection overlay.
+            val reply = CompletableDeferred<ManualCorrection?>()
+            manualReviewReply = reply
+            _manualReview.value = ManualReview(pageIndex, ocr.text, translated)
+            val correction = try { reply.await() } finally {
+                manualReviewReply = null
+                _manualReview.value = null
+            } ?: return
+            val correctedSource = correction.sourceText.trim()
+            if (correctedSource.isBlank()) return
+            translated = if (correction.translatedText.trim().isNotBlank() &&
+                (correction.translatedText != translated || correctedSource == ocr.text))
+                correction.translatedText.trim()
+            else try {
+                translateSingle(correctedSource, app,
+                    if (sourceHint == MangaSourceLanguage.AUTO) mangaSourceOfText(correctedSource, ocr.region.sourceLanguage)
+                    else sourceHint)
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { promptTranslateFailedIfPossible(e); return }
+            if (translated.isBlank()) return
 
             // 5. 擦字 + 回填到底图,产出新 PNG
             _status.postValue(Stage(app.getString(R.string.ocr_writeback_running)))
             val outFile = withContext(Dispatchers.IO) {
-                runCatching { renderManualOnto(app, ocr.renderBase, pageIndex, ocr.region.copy(text = ocr.text), translated) }
+                runCatching { renderManualOnto(app, ocr.renderBase, pageIndex, ocr.region.copy(text = correctedSource),
+                    translated, ocr.textMask) }
                     .onFailure { Timber.e(it, "manual: render failed") }.getOrNull()
             }
             if (outFile == null) {
@@ -333,6 +371,7 @@ class ImageTranslationViewModel(application: Application) : AndroidViewModel(app
         val renderBase: MangaPageTranslatePipeline.RenderBase,
         val region: OcrTextRegion,
         val text: String,
+        val textMask: TextMask?,
     )
 
     /**
@@ -340,7 +379,9 @@ class ImageTranslationViewModel(application: Application) : AndroidViewModel(app
      * crop 出来喂 manga-ocr。region 直接构造在「底图像素坐标系」下,后续擦/填都在这套坐标里,
      * 不再有 sample 还原那一层。框太小 / 解码失败返回 null。
      */
-    private suspend fun recognizeManualRegion(file: File, l: Float, t: Float, r: Float, b: Float): ManualOcr? {
+    private suspend fun recognizeManualRegion(file: File, originalFile: File,
+        l: Float, t: Float, r: Float, b: Float,
+        sourceHint: MangaSourceLanguage): ManualOcr? {
         val renderBase = MangaPageTranslatePipeline.decodeRenderBase(app, file) ?: return null
         val base = renderBase.bitmap
         var keep = false
@@ -355,16 +396,51 @@ class ImageTranslationViewModel(application: Application) : AndroidViewModel(app
             val rh = y1 - y0
             if (rw < MIN_MANUAL_REGION_PX || rh < MIN_MANUAL_REGION_PX) return null
 
+            // A reselected bubble may already contain translated pixels. Restore only this
+            // rectangle from the original before OCR and repaint, preserving other bubbles.
+            if (file.absolutePath != originalFile.absolutePath) {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(originalFile.absolutePath, bounds)
+                val src = Rect((l * bounds.outWidth).toInt(), (t * bounds.outHeight).toInt(),
+                    (r * bounds.outWidth).toInt(), (b * bounds.outHeight).toInt())
+                val decoder = BitmapRegionDecoder.newInstance(originalFile.absolutePath, false)
+                try {
+                    val patch = decoder.decodeRegion(src, BitmapFactory.Options().apply {
+                        inSampleSize = renderBase.sample
+                        inPreferredConfig = Bitmap.Config.ARGB_8888
+                    })
+                    try { Canvas(base).drawBitmap(patch, null, Rect(x0, y0, x1, y1), Paint(Paint.FILTER_BITMAP_FLAG)) }
+                    finally { patch.recycle() }
+                } finally { decoder.recycle() }
+            }
+
             // createBitmap 在「子区域==整图且 base 不可变」时会直接返回 base 本身;
             // 此时绝不能 recycle,否则把底图也回收了,后续 eraseText 直接挂。
             val crop = Bitmap.createBitmap(base, x0, y0, rw, rh)
-            val result = try {
-                models.ocr.recognize(crop)
+            val localMask = try {
+                models.detector.detect(crop).textMask?.copy(coverage = MaskCoverage(x0, y0, x1, y1))
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { Timber.w(e, "manual: mask detection failed"); null }
+            val (recognized, confidence, language) = try {
+                val alternatives = MangaMultilingualOcr.recognize(crop, sourceHint)
+                val other = alternatives.firstOrNull { it.sourceLanguage != MangaSourceLanguage.JAPANESE }
+                if (other != null) Triple(other.text, 1f, other.sourceLanguage)
+                else if (sourceHint == MangaSourceLanguage.ENGLISH || sourceHint == MangaSourceLanguage.KOREAN)
+                    Triple("", 0f, sourceHint)
+                else {
+                    val result = try { models.ocr.recognize(crop) }
+                    catch (e: CancellationException) { throw e }
+                    catch (e: Exception) { Timber.w(e, "manual: OCR empty, allow typing"); OcrResult("", 0f) }
+                    val backup = alternatives.firstOrNull { it.sourceLanguage == MangaSourceLanguage.JAPANESE }
+                    if (result.text.isBlank() && backup != null)
+                        Triple(backup.text, 1f, MangaSourceLanguage.JAPANESE)
+                    else Triple(result.text, result.confidence, MangaSourceLanguage.JAPANESE)
+                }
             } finally {
                 if (crop !== base) crop.recycle()
             }
             val region = OcrTextRegion(
-                text = result.text,
+                text = recognized,
                 cx = x0 + rw / 2f,
                 cy = y0 + rh / 2f,
                 width = rw.toFloat(),
@@ -378,20 +454,22 @@ class ImageTranslationViewModel(application: Application) : AndroidViewModel(app
                     x1.toFloat() to y1.toFloat(),
                     x0.toFloat() to y1.toFloat(),
                 ),
-                recogConfidence = result.confidence,
+                recogConfidence = confidence,
+                sourceLanguage = if (sourceHint == MangaSourceLanguage.AUTO) language else sourceHint,
             )
             keep = true
-            return ManualOcr(renderBase, region, result.text.trim())
+            return ManualOcr(renderBase, region, recognized.trim(), localMask)
         } finally {
             if (!keep) base.recycle()
         }
     }
 
-    private suspend fun translateSingle(text: String, app: Context): String {
+    private suspend fun translateSingle(text: String, app: Context, source: MangaSourceLanguage): String {
         var out = ""
-        currentTranslator().translateBatch(
+        mangaTranslator(source).translateBatchFrom(
             inputs = listOf(text),
-            outputLang = appTranslateTargetLang(),
+            sourceLang = source.code,
+            outputLang = mangaTargetLanguage(appTranslateTargetLang()),
             onItem = { _, translated -> out = translated },
             onPhase = { phase -> _status.postValue(MangaPageTranslatePipeline.translatePhaseStage(app, phase)) },
             onRequestSent = { aiRequestSent = true },
@@ -409,9 +487,14 @@ class ImageTranslationViewModel(application: Application) : AndroidViewModel(app
         pageIndex: Int,
         region: OcrTextRegion,
         translated: String,
+        textMask: TextMask?,
     ): File {
-        TextEraser.eraseText(base.bitmap, listOf(region), null, base.pxScale)
-        TextRenderer.renderTranslations(Canvas(base.bitmap), listOf(region), mapOf(0 to translated), base.pxScale)
+        require(TextRenderer.canFit(translated, region, base.pxScale)) { "translation does not fit selected region" }
+        require(TextEraser.eraseText(base.bitmap, listOf(region), textMask, base.pxScale) > 0) {
+            "no reliable text mask in selected region"
+        }
+        TextRenderer.renderTranslations(Canvas(base.bitmap), listOf(region), mapOf(0 to translated),
+            base.pxScale, base.bitmap)
         return MangaPageTranslatePipeline.writeTranslatedPng(app, base.bitmap, pageIndex)
     }
 
@@ -425,6 +508,7 @@ class ImageTranslationViewModel(application: Application) : AndroidViewModel(app
         // 但阻塞调用可能还在跑,晚到的异常不能误报「翻译失败」。
         // 译图文件归 MangaBatchTranslateCenter 管(按作品 LRU 清理),这里不删。
         cancelledByUser = true
+        manualReviewReply?.cancel()
         pipelineJob?.cancel()
     }
 

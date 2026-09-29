@@ -58,6 +58,7 @@ import ceui.pixiv.ui.translate.ComicTextDetectorModelManager
 import ceui.pixiv.ui.translate.MangaOcrModel
 import ceui.pixiv.ui.translate.MangaOcrModelManager
 import ceui.pixiv.ui.translate.MangaTranslatePrepSheet
+import ceui.pixiv.ui.translate.MangaSourceLanguage
 import ceui.pixiv.ui.upscale.BackgroundRemover
 import ceui.pixiv.ui.upscale.ModelPickerDialog
 import ceui.pixiv.ui.upscale.RembgModel
@@ -223,19 +224,19 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
                     actions +=
                         getString(R.string.string_ai_manga_translate_inline) to
                             {
-                                performAiMangaTranslateInline(illust, baseBind!!.viewPager.currentItem)
+                                chooseMangaSource { performAiMangaTranslateInline(illust, baseBind!!.viewPager.currentItem, it) }
                             }
                     if (illust.page_count > 1) {
                         actions +=
                             getString(R.string.string_ai_manga_translate_batch) to
                                 {
-                                    performAiMangaTranslateBatch(illust)
+                                    chooseMangaSource { performAiMangaTranslateBatch(illust, it) }
                                 }
                     }
                     actions +=
                         getString(R.string.string_ai_manga_translate_manual) to
                             {
-                                performAiMangaTranslateManual(illust, baseBind!!.viewPager.currentItem)
+                                chooseMangaSource { performAiMangaTranslateManual(illust, baseBind!!.viewPager.currentItem, it) }
                             }
                     actions +=
                         getString(R.string.string_set_wallpaper) to
@@ -584,19 +585,19 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
             actions +=
                 getString(R.string.string_ai_manga_translate_inline) to
                     {
-                        performAiMangaTranslateInline(illust, baseBind!!.viewPager.currentItem)
+                        chooseMangaSource { performAiMangaTranslateInline(illust, baseBind!!.viewPager.currentItem, it) }
                     }
             if (illust.page_count > 1) {
                 actions +=
                     getString(R.string.string_ai_manga_translate_batch) to
                         {
-                            performAiMangaTranslateBatch(illust)
+                            chooseMangaSource { performAiMangaTranslateBatch(illust, it) }
                         }
             }
             actions +=
                 getString(R.string.string_ai_manga_translate_manual) to
                     {
-                        performAiMangaTranslateManual(illust, baseBind!!.viewPager.currentItem)
+                        chooseMangaSource { performAiMangaTranslateManual(illust, baseBind!!.viewPager.currentItem, it) }
                     }
             actions +=
                 getString(R.string.string_set_wallpaper) to
@@ -1063,7 +1064,20 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
      * AI 菜单「翻译漫画」入口。所有重活搬到了 [ImageTranslationViewModel], 这里只负责模型存在性检查 + 拉图 + 把 File 喂给 VM。 Overlay
      * UI 由 [observeTranslationStatus] 单独驱动。
      */
-    private fun performAiMangaTranslateInline(illust: Illust, pageIndex: Int) {
+    private fun chooseMangaSource(onChosen: (MangaSourceLanguage) -> Unit) {
+        val choices = MangaSourceLanguage.entries
+        WitDialog.MenuDialogBuilder(this)
+            .addItems(arrayOf(
+                getString(R.string.manga_source_auto), getString(R.string.manga_source_ja),
+                getString(R.string.manga_source_en), getString(R.string.manga_source_ko),
+            )) { dialog, which ->
+                dialog.dismiss()
+                onChosen(choices[which])
+            }.show()
+    }
+
+    private fun performAiMangaTranslateInline(illust: Illust, pageIndex: Int,
+        sourceHint: MangaSourceLanguage = MangaSourceLanguage.AUTO) {
         val ocrModel = MangaOcrModel.MANGA_OCR_BASE
         val ctdModel = ComicTextDetectorModel.CTD_BASE
         val ocrReady = MangaOcrModelManager.isModelReady(this, ocrModel)
@@ -1074,7 +1088,7 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
             if (supportFragmentManager.findFragmentByTag(MangaTranslatePrepSheet.TAG) != null)
                 return
             val sheet = MangaTranslatePrepSheet()
-            sheet.setOnReady { performAiMangaTranslateInline(illust, pageIndex) }
+            sheet.setOnReady { performAiMangaTranslateInline(illust, pageIndex, sourceHint) }
             sheet.show(supportFragmentManager, MangaTranslatePrepSheet.TAG)
             return
         }
@@ -1098,7 +1112,7 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
                 return@launch
             }
             // 平板双栏另一个详情页正跑单页翻译时,begin 会失败:进程只允许一条单页流水线。
-            if (!translationViewModel.start(file, pageIndex, ocrModel, ctdModel)) {
+            if (!translationViewModel.start(file, pageIndex, ocrModel, ctdModel, sourceHint)) {
                 Common.showToast(R.string.string_ai_translate_in_progress)
             }
         }
@@ -1109,7 +1123,8 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
      * [ceui.pixiv.ui.translate.MangaBatchTranslateCenter] 整批跑。
      * 任务不跟本页生命周期走:进度在每个页面都挂着的悬浮小窗里,退出看图页也继续, 回来译图都在(本页 Fragment 观察的就是中心里这部作品的桶)。
      */
-    private fun performAiMangaTranslateBatch(illust: Illust) {
+    private fun performAiMangaTranslateBatch(illust: Illust,
+        sourceHint: MangaSourceLanguage = MangaSourceLanguage.AUTO) {
         val ocrModel = MangaOcrModel.MANGA_OCR_BASE
         val ctdModel = ComicTextDetectorModel.CTD_BASE
         val ocrReady = MangaOcrModelManager.isModelReady(this, ocrModel)
@@ -1118,7 +1133,7 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
             if (supportFragmentManager.findFragmentByTag(MangaTranslatePrepSheet.TAG) != null)
                 return
             val sheet = MangaTranslatePrepSheet()
-            sheet.setOnReady { performAiMangaTranslateBatch(illust) }
+            sheet.setOnReady { performAiMangaTranslateBatch(illust, sourceHint) }
             sheet.show(supportFragmentManager, MangaTranslatePrepSheet.TAG)
             return
         }
@@ -1134,7 +1149,7 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
                 IllustDownload.getUrl(illust, page, Params.IMAGE_RESOLUTION_ORIGINAL)
                     ?: IllustDownload.getUrl(illust, page, Params.IMAGE_RESOLUTION_LARGE)
             }
-        if (!appServices().mangaBatchTranslateCenter.start(illust, urls, ocrModel, ctdModel)) {
+        if (!appServices().mangaBatchTranslateCenter.start(illust, urls, ocrModel, ctdModel, sourceHint)) {
             Common.showToast(R.string.string_ai_translate_in_progress)
         }
     }
@@ -1143,7 +1158,8 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
      * AI 菜单「圈选翻译」入口(issue #891)。模型就绪检查复用「翻译漫画」那套(同一 prep sheet,本机只下一次),通过后只往 VM 投一个圈选请求,真正的框选 +
      * 流水线由当前页 [FragmentImageDetail] 接管 —— Activity 不直接持 Fragment 引用,也不碰图片触摸。
      */
-    private fun performAiMangaTranslateManual(illust: Illust, pageIndex: Int) {
+    private fun performAiMangaTranslateManual(illust: Illust, pageIndex: Int,
+        sourceHint: MangaSourceLanguage = MangaSourceLanguage.AUTO) {
         val ocrModel = MangaOcrModel.MANGA_OCR_BASE
         val ctdModel = ComicTextDetectorModel.CTD_BASE
         val ocrReady = MangaOcrModelManager.isModelReady(this, ocrModel)
@@ -1152,7 +1168,7 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
             if (supportFragmentManager.findFragmentByTag(MangaTranslatePrepSheet.TAG) != null)
                 return
             val sheet = MangaTranslatePrepSheet()
-            sheet.setOnReady { performAiMangaTranslateManual(illust, pageIndex) }
+            sheet.setOnReady { performAiMangaTranslateManual(illust, pageIndex, sourceHint) }
             sheet.show(supportFragmentManager, MangaTranslatePrepSheet.TAG)
             return
         }
@@ -1163,7 +1179,7 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
             Common.showToast(R.string.string_ai_translate_in_progress)
             return
         }
-        translationViewModel.requestManualSelection(pageIndex)
+        translationViewModel.requestManualSelection(pageIndex, sourceHint)
     }
 
     /** VM.status 单一来源驱动 overlay:非 null 显示并刷状态/进度,null 淡出隐藏。 */

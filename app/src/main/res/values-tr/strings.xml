@@ -781,6 +781,15 @@
     <string name="string_translate_model_loading">Çeviri modeli yükleniyor…</string>
     <string name="string_ai_manga_translate_inline">Manga çevirisi</string>
     <string name="string_ai_manga_translate_manual">Seçerek çevir</string>
+    <string name="manga_source_auto">Kaynak dili otomatik algıla</string>
+    <string name="manga_source_ja">Kaynak: Japonca</string>
+    <string name="manga_source_en">Kaynak: İngilizce</string>
+    <string name="manga_source_ko">Kaynak: Korece</string>
+    <string name="manga_review_title">Seçili çeviriyi gözden geçir</string>
+    <string name="manga_review_source">Tanınan metin</string>
+    <string name="manga_review_translation">Çince çeviri</string>
+    <string name="manga_review_apply">Uygula</string>
+    <string name="manga_review_reselect">Alanı yeniden seç</string>
     <string name="string_ai_manga_translate_batch">Tüm sayfaları çevir</string>
     <string name="string_ai_manga_batch_loading_image">Görsel yükleniyor…</string>
     <string name="string_ai_manga_batch_summary">Tümü tamamlandı: %1$d çevrildi, %2$d metinsiz, %3$d başarısız</string>
