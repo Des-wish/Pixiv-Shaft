@@ -60,6 +60,9 @@ RUN set -eux; \
     rm -rf /tmp/android-cmdline-tools /tmp/android-command-line-tools.zip; \
     apt-get clean
 
+RUN JAVA_TOOL_OPTIONS="-Dhttps.protocols=TLSv1.3,TLSv1.2 -Djdk.tls.client.protocols=TLSv1.3,TLSv1.2" \
+    sdkmanager --sdk_root="${ANDROID_HOME}" --install "build-tools;35.0.0"
+
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 
 WORKDIR /workspace
